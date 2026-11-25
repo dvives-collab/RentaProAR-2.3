@@ -1,0 +1,90 @@
+name: Compilar Escritorio y Android
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  # 1. Compilar para Android (.apk) usando Capacitor existente
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Descomprimir proyecto
+        run: unzip "*.zip" -d ./app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Compilar Web y generar APK
+        run: |
+          DIR=$(dirname $(find ./app -name "package.json" | head -n 1))
+          cd "$DIR"
+          npm install
+          npm run build
+          
+          # Como ya existe capacitor.config.ts, solo agregamos Android si falta y sincronizamos
+          if [ ! -d "android" ]; then
+            npm install @capacitor/android
+            npx cap add android
+          fi
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Subir APK compilado
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-android
+          path: app/**/android/app/build/outputs/apk/debug/app-debug.apk
+
+  # 2. Compilar para Escritorio Windows (.exe) usando Electron
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Descomprimir proyecto
+        run: Expand-Archive -Path *.zip -DestinationPath ./app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Compilar Web y generar EXE
+        run: |
+          $dir = (Get-ChildItem -Path ./app -Filter "package.json" -Recurse | Select-Object -First 1).DirectoryName
+          cd "$dir"
+          npm install
+          npm run build
+          
+          $webDir = if (Test-Path "dist") { "dist" } else { "build" }
+          npm install electron electron-packager --save-dev
+          
+          # Registrar electron-main.js como punto de entrada en package.json
+          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json')); p.main='electron-main.js'; fs.writeFileSync('package.json', JSON.stringify(p,null,2));"
+          
+          @"
+          const { app, BrowserWindow } = require('electron');
+          const path = require('path');
+          app.whenReady().then(() => {
+            const win = new BrowserWindow({ width: 1200, height: 800 });
+            win.loadFile(path.join(__dirname, '$webDir/index.html'));
+          });
+          app.on('window-all-closed', () => app.quit());
+          "@ | Out-File -FilePath "electron-main.js" -Encoding utf8
+          
+          npx electron-packager . RentaProAR --platform=win32 --arch=x64 --out=release --overwrite
+
+      - name: Subir app de Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-windows
+          path: app/**/release/RentaProAR-win32-x64/
